@@ -1,0 +1,12 @@
+
+VCFtools - 0.1.15
+(C) Adam Auton and Anthony Marcketta 2009
+
+Parameters as interpreted:
+	--vcf filt2.vcf
+	--hardy
+
+After filtering, kept 34 out of 34 Individuals
+Outputting HWE statistics (but only for biallelic loci)
+After filtering, kept 14389 out of a possible 14389 Sites
+Run Time = 0.00 seconds

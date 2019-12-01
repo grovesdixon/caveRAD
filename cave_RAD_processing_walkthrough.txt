@@ -1,0 +1,933 @@
+#cave RAD data processing
+
+#downloaded reads from Basespace after receiving transfer email from GSAF
+#for instructions of Basespace downloading, see 'downloading_NGS_data_from_GSAF.txt'
+
+
+########################################
+#### DOWNLOAD READS FROM BASE-SPACE ####
+########################################
+#(see downloading_NGS_data_from_GSAF.txt for more on this)
+
+#download from Basespace
+FASTQDIR="JA19077_download"
+bs download project -i 126488488 -o $FASTQDIR
+
+
+#backup on corral
+cp -r $FASTQDIR/ /corral-repl/utexas/tagmap/dixon_backups/caveRAD
+
+
+#move fastqs into single directory
+mkdir raw_fastqs
+
+>mvFastqs
+for dir in $(ls -d $FASTQDIR/SA*/)
+do echo "mv ${dir}*.gz raw_fastqs/" >> mvFastqs
+done
+
+
+#check reads
+ls *.gz | wc -l
+	#9 = 9 samples * across a single lane
+
+
+#gunzip them
+rename _L006_R1_001.fastq .fastq *_001.fastq
+
+
+#get total raw counts
+wc -l *.fastq |\
+ awk '{split($2, a, ".fastq")
+ print a[1]"\t"$1/4"\trawCounts"}' |\
+ grep -v total > raw_read_counts.tsv
+
+
+#check for bcg1-like reads
+
+echo -e "filename\ttotalReads\ttotalBCG1\tproportionBCG1" > 2bradLikeCounts.tsv
+for file in *.fastq
+do echo "${file}..."
+ TOTAL_READS=$(expr $(cat $file | wc -l) / 4)
+ FORWARD_BCG1=$(grep "CGA......TGC" $file | wc -l)
+ REVERSE_BCG1=$(grep "GCA......TCG" $file | wc -l)
+ TOTAL_BCG1=$(expr $FORWARD_BCG1 + $REVERSE_BCG1)
+ echo -e "${file}\t${TOTAL_READS}\t${TOTAL_BCG1}" >> 2bradLikeCounts.tsv
+done
+ 
+
+
+
+############################################################
+## TRIM, DEMULTIPLEX, DEDUPLICATE, QUALITY FILTER, RENAME ##
+############################################################
+
+#trim, demultiplex, and dedup
+2bRAD_trim_launch_dedup.pl fastq > trims
+launcher_creator.py -n trims -j trims -q development -N 1 -w 9 -a $allo -e $email -t 02:00:00
+sbatch trims.slurm
+
+#quality filter
+ls *.tr0 | perl -pe 's/^(\S+)\.tr0$/cat $1\.tr0 \| fastq_quality_filter -q 20 -p 100 >$1\.trim/' >filt0
+
+
+#rename based on PCR and ligation barcodes
+
+
+#get list of trimmedFiles
+ls *.trim > trimmedFiles.txt
+
+#use rename_caveRAD.R to make merged dataframe mergedBCs.tsv
+
+#use awk to make commands
+awk '{print "cp "$2" "$1"_rename.trim"}' mergedBCs.tsv > rnCopy
+
+
+
+#CONTINUE PIPELINE
+#split files into nesticus and ptomaphagus directories
+ls nesticus/*.trim
+	#54
+	#note that this includes two mislabeled samples that were eventually removed.
+
+ls ptomaphagus/*.trim | wc -l
+	#34
+	
+	
+#repeat the bgc1 check 
+echo -e "filename\ttotalReads\ttotalBCG1" > 2bradTrimCounts.tsv
+for file in *.trim
+do echo "${file}..."
+ TOTAL_READS=$(expr $(cat $file | wc -l) / 4)
+ FORWARD_BCG1=$(grep "CGA......TGC" $file | wc -l)
+ REVERSE_BCG1=$(grep "GCA......TCG" $file | wc -l)
+ TOTAL_BCG1=$(expr $FORWARD_BCG1 + $REVERSE_BCG1)
+ echo -e "${file}\t${TOTAL_READS}\t${TOTAL_BCG1}" >> 2bradTrimCounts.tsv
+done
+
+#get read counts
+wc -l *.trim |\
+ awk '{split($2, a, ".trim")
+ print a[1]"\t"$1/4"\ttrimmedCounts"}' |\
+ grep -v total > trimmed_read_counts.tsv 
+
+
+#for each:
+#make stacks
+ls *.trim | perl -pe 's/^(.+)$/uniquerOne.pl $1 >$1\.uni/' >unii
+
+
+# collecting common tags (= major alleles)
+# merging uniqued files (set minInd to >10, or >10% of total number of samples, whichever is greater)
+mergeUniq.pl uni minInd=10 >all.uniq
+
+# discarding tags that have more than 7 observations without reverse-complement
+awk '!($3>7 && $4==0) && $2!="seq"' all.uniq >all.tab
+
+# creating fasta file out of merged and filtered tags:
+awk '{print ">"$1"\n"$2}' all.tab > all.fasta
+
+# clustering allowing for up to 3 mismatches (-c 0.91); the most abundant sequence becomes reference
+cd-hit-est -i all.fasta -o cdh_alltags.fas -aL 1 -aS 1 -g 1 -c 0.91 -M 0 -T 0  
+
+
+#------------
+# making fake reference genome (of 30 chromosomes) out of major-allele tags
+# need bowtie2 and samtools for indexing
+
+concatFasta.pl fasta=cdh_alltags.fas num=30
+
+# formatting fake genome
+module load bowtie
+module load samtools
+module load picard
+export GENOME_FASTA=cdh_alltags_cc.fasta
+export GENOME_DICT=cdh_alltags_cc.dict 
+bowtie2-build $GENOME_FASTA $GENOME_FASTA
+samtools faidx $GENOME_FASTA
+java -jar /work/02260/grovesd/lonestar/picard/picard-tools-1.119/CreateSequenceDictionary.jar R=$GENOME_FASTA O=$GENOME_DICT
+
+#==============
+
+# for denovo: map reads to fake genome with bowtie2: 
+GENOME_FASTA=cdh_alltags_cc.fasta
+>maps
+for F in `ls *.trim`; do
+echo "bowtie2 --no-unal -x $GENOME_FASTA -U $F -S $F.sam -p 12">>maps
+done
+
+#get alignment rates
+>alignmentRates
+for F in `ls *trim`
+do M=`grep -E '^[ATGCN]+$' $F | wc -l | grep -f - maps.e* -A 4 | tail -1 | perl -pe 's/maps\.e\d+-|% overall alignment rate//g'` ;
+echo "$F.sam $M">>alignmentRates;
+done
+
+
+# next stage is compressing, sorting and indexing the SAM files, so they become BAM files:
+#set up commands
+GENOME_FASTA=cdh_alltags_cc.fasta
+>s2b
+for SAMFILE in *.sam
+do BASENAME=${SAMFILE/.sam/}
+ echo "samtools import $GENOME_FASTA $SAMFILE ${BASENAME}.unsorted.bam &&\
+ samtools sort -o ${BASENAME}.sorted.bam ${BASENAME}.unsorted.bam &&\
+ java -Xmx5g -jar /work/02260/grovesd/lonestar/picard/picard-tools-1.119/AddOrReplaceReadGroups.jar INPUT=${BASENAME}.sorted.bam OUTPUT=${BASENAME}.bam RGID=group1 RGLB=lib1 RGPL=illumina RGPU=unit1 RGSM=$BASENAME &&\
+ samtools index ${BASENAME}.bam" >> s2b
+done
+
+
+
+# run all commands listed in s2b file
+mkdir sortedBams
+mv *sorted.bam sortedBams/
+ls *.bam | wc -l  # should be the same number as number of trim files
+
+
+#rename them for cleanliness
+rename .trim.sorted.bam .bam *.trim.sorted.bam
+
+
+#get mapped counts
+>getInitialAlignment
+for file in *.bam
+do echo "samtools flagstat $file > ${file/_sorted.bam/}_prededup_flagstats.txt" >> getInitialAlignment
+done
+
+#format them
+>mapped_count.tsv
+for file in *prededup_flagstats.txt
+do pp=$(grep "mapped" $file | head -n 1)
+ echo -e "$file\t$pp" |\
+ awk '{split($1, a, "_prededup_flagstats.txt")
+ print a[1]"\t"$2"\tpredupMapped"}' >> mapped_count.tsv
+ done
+
+
+#######################################################
+############### GENOTYPING WITH MPILEUP ###############
+#######################################################
+
+#run mpileup
+ls *.bam > bamList.txt
+GENOME_FASTA=cdh_alltags_cc.fasta
+echo "samtools mpileup -f $GENOME_FASTA -t DP,AD,ADF,ADR,SP -u -v -b bamList.txt > mpileupResults.vcf" >runmpile
+
+
+
+#call genotypes
+echo "bcftools call -vmO v -o raw_calls.vcf mpileupResults.vcf && \
+bcftools filter --exclude 'QUAL < 20' raw_calls.vcf | \
+bcftools view > filt0.vcf" >callQuality
+
+
+#clean sample names in called genotypes
+sed -i.bak 's/.bam//g' filt0.vcf
+
+
+#######################################################
+################### FILTER GENOTYPES ##################
+#######################################################
+
+#APPLY BASIC FILTERS
+
+#first identify private variants (as these only affect a single individual we're not worried about them)
+vcftools --vcf filt0.vcf --singletons -c | tail -n +2 | cut -f 1,2 > singletonSites.txt
+
+#remove singletons, and indels, and keep only bi-allelic sites
+vcftools --vcf filt0.vcf\
+ --exclude-positions singletonSites.txt\
+ --remove-indels\
+ --minDP 2\
+ --max-missing 0.75\
+ --min-alleles 2\
+ --max-alleles 2\
+ --recode -c > filt1.vcf
+
+
+#For Nesticus, build a clonepairs.tab table of clone pairs from vcf eg:
+NBSB1	NBSB1rep
+NBSB2	NBSB2rep
+NBSB4	NBSB4rep
+NBSB6	NBSB6rep
+NBST8	NBST8rep
+NBST9	NBST9rep
+
+#look at the replicate matching rate for unfiltered genotypes
+repMatchStats.pl vcf=filt1.vcf replicates=clonepairs.tab
+
+
+#------ DECIDE DEPTH CUTOFF BASED ON REPLICATE AGREEMENT ----#
+#here I looped through some depth cutoffs to see how they improved our replicate matching stats
+#weirdly, the lowest depth cutoff of 2 produced the best results, so I just went with that below to generate the filt2.vcf file
+
+
+#set up range of cutoffs and output files
+seq 3 20 > depthCutoffs.txt
+>meanHetDiscoveryRate.txt
+>meanAgreementPct.txt
+>retainedSites.txt
+
+#loop through cutoffs and run replicate agreement
+while read i
+do echo "------- running depth cutoff = $i..."
+R_MATCH_OUT=checkDP${i}.repMatchStats.txt
+vcftools --vcf filt1.vcf --minDP $i --max-missing 0.50 --recode -c > checkDP${i}.vcf
+repMatchStats.pl vcf=checkDP${i}.vcf replicates=clonepairs.tab > $R_MATCH_OUT
+awk '{split($11, REM, "."); if (REM[1]=="0") print $11}' $R_MATCH_OUT | awk 'BEGIN{sum+=$1};{sum+=$1};END{print sum/NR}' >> meanHetDiscoveryRate.txt
+done < depthCutoffs.txt
+#------------------------------------------------------------#
+
+#now that we're done with the replicates, choose the member of the pair with more read counts to keep
+#for nesticus this ended up being simple, all the 'rep' samples were better sequenced
+#so remove the 'non-rep' samples, then trim the 'rep' strings in the final vcf
+cut -f 1 clonepairs.tab > toRemove.txt
+
+#for Nesticus, remove the two mixed up samples as well:
+echo "NBSB2
+SBST3" >> toRemove.txt
+
+
+#apply final filters
+CHOSEN_DEPTH=2
+vcftools --vcf filt1.vcf --minDP $CHOSEN_DEPTH --max-missing 0.8 --remove toRemove.txt --recode -c > filt2.vcf
+
+#final name cleaning
+sed -i.bak 's/rep//g' filt2.vcf
+
+
+#REMOVE SITES WITH EXCESSIVE HETEROZYGOSITY
+#run hardy weinberg test with vctools
+vcftools --vcf filt2.vcf  --hardy
+
+#send output out.hwe to PC and choose a cutoff (0.2 seems good) for the p-value for heterozygote excess and plot with het_excess.R
+#send back the acceptable sites to TACC and filter
+vcftools --vcf filt2.vcf --positions sites_with_acceptable_heterozygosity.tsv --recode -c > filt3.vcf
+
+
+#####################################################
+############# BASIC STATS WITH VCFTOOLS #############
+#####################################################
+
+#vcftools documentation: https://vcftools.github.io/examples.html
+
+#MAKE POPULATION FILES
+
+#pick species
+SPP="NB"
+SPP="PH"
+
+#pull out sample names by cave
+grep CHROM filt3.vcf | tr "\t" "\n" | grep ${SPP} | grep -v rep > samples.txt
+grep ${SPP}BT samples.txt > BT_samples.txt
+grep ${SPP}GV samples.txt > GV_samples.txt
+grep ${SPP}SB samples.txt > SB_samples.txt
+grep ${SPP}ST samples.txt > ST_samples.txt
+
+
+
+#get pairwise fst between populations
+vcftools --vcf filt3.vcf --weir-fst-pop BT_samples.txt --weir-fst-pop GV_samples.txt --out BT_GV
+vcftools --vcf filt3.vcf --weir-fst-pop BT_samples.txt --weir-fst-pop SB_samples.txt --out BT_SB
+vcftools --vcf filt3.vcf --weir-fst-pop BT_samples.txt --weir-fst-pop ST_samples.txt --out BT_ST
+vcftools --vcf filt3.vcf --weir-fst-pop GV_samples.txt --weir-fst-pop SB_samples.txt --out GV_SB
+vcftools --vcf filt3.vcf --weir-fst-pop GV_samples.txt --weir-fst-pop ST_samples.txt --out GV_ST
+vcftools --vcf filt3.vcf --weir-fst-pop SB_samples.txt --weir-fst-pop ST_samples.txt --out SB_ST
+
+
+#get fst across all populations
+vcftools --vcf filt3.vcf --weir-fst-pop BT_samples.txt --weir-fst-pop GV_samples.txt --weir-fst-pop SB_samples.txt --weir-fst-pop ST_samples.txt --out ALL_CAVES
+
+
+#assemble results into single tsv
+echo -e "CHROM\tPOS\tWEIR_AND_COCKERHAM_FST\tgroup" > all_fst_results.tsv
+for file in *weir.fst
+do echo "${file}..."
+ tail -n +2 $file | awk -v f="${file/.weir.fst/}" '{print $0"\t"f}' >> all_fst_results.tsv
+done
+
+
+
+#####################################################
+######################## DXY ########################
+#####################################################
+
+#get pairwise dxy between populations
+vcf_dxy.R --vcf filt3.vcf --popX BT_samples.txt --popY GV_samples.txt --out BT_GV.dxy
+vcf_dxy.R --vcf filt3.vcf --popX BT_samples.txt --popY SB_samples.txt --out BT_SB.dxy
+vcf_dxy.R --vcf filt3.vcf --popX BT_samples.txt --popY ST_samples.txt --out BT_ST.dxy
+vcf_dxy.R --vcf filt3.vcf --popX GV_samples.txt --popY SB_samples.txt --out GV_SB.dxy
+vcf_dxy.R --vcf filt3.vcf --popX GV_samples.txt --popY ST_samples.txt --out GV_ST.dxy
+vcf_dxy.R --vcf filt3.vcf --popX SB_samples.txt --popY ST_samples.txt --out SB_ST.dxy
+
+
+#assemble into single results file
+#assemble results into single tsv
+echo -e "CHROM\tPOS\tdxy\tgroup" > all_dxy_results.tsv
+for file in *.dxy
+do echo "${file}..."
+ tail -n +2 $file | awk -v f="${file/.dxy/}" '{print $0"\t"f}' >> all_dxy_results.tsv
+done
+
+
+#send all_fst_results.tsv and all_dxy_results.tsv to caveRAD/mpileup_analyses and plot with plot_fst_dxy.R
+
+#####################################################
+######################## PI #########################
+#####################################################
+#get the nucleotide diversity
+
+#split the vcf by population
+vcftools --vcf filt3.vcf --keep BT_samples.txt --recode --out BT
+vcftools --vcf filt3.vcf --keep GV_samples.txt --recode --out GV
+vcftools --vcf filt3.vcf --keep SB_samples.txt --recode --out SB
+vcftools --vcf filt3.vcf --keep ST_samples.txt --recode --out ST
+
+#get pi for each
+for file in *.recode.vcf
+do echo "vcftools --vcf $file --site-pi --out ${file/.recode.vcf/}"
+done
+
+
+#######################################################
+############## ADMIXTURE FROM MPILEUP #################
+#######################################################
+
+#get bed file from vcf
+plink2 --vcf filt3.vcf --make-bed --out filt3 --chr-set 30 no-xy
+
+#get optimal number for K
+for K in 1 2 3 4 5 6 7 8
+do admixture --cv filt3.bed $K | tee log${K}.out
+done
+
+#check results
+grep -h CV log*.out | \
+awk 'BEGIN{print "k\tcvError"}
+{split($3, a, "=")
+split(a[2], b, ")")
+print b[1]"\t"$4}' > cvErrorResults.tsv
+
+
+
+######################################################
+################ ANGSD ASSESS QUALITY ################
+######################################################
+
+#Here starting a new directory
+# "FUZZY genotyping" with ANGSD - without calling actual genotypes but working with genotype likelihoods at each SNP. Optimal for low-coverage data (<10x).
+# if your coverage is >10x, go to GATK section below
+
+
+# listing all bam filenames 
+ls *bam >bams
+
+#also convenient to make list of sample names eg:
+sed 's/.bam//' bams > samples.txt
+
+
+
+# angsd filters:
+# -uniqueOnly 1 : Remove reads that have multiple best hits. 0 no (default), 1 remove
+# -remove_bads 1 : Same as the samtools flags -x which removes read with a flag above 255 (not primary, failure and duplicate reads). 0 no , 1 remove (default).
+# -minMapQ 20 : only highly unique mappings (prob of erroneous mapping = 1%); [MapQ = −10 log10 Pr{mapping position is wrong}, rounded to the nearest integer]
+# -maxDepth : highest total depth (sum over all samples) to assess; set to 10x number of samples
+# -baq 1 : realign around indels (not terribly relevant for 2bRAD reads mapped with --local option) 
+FILTERS="-uniqueOnly 1 -remove_bads 1 -minMapQ 20 -maxDepth 1000"
+
+
+#quality assessment options
+# -doQsDist 1 : Count the number of bases for each quality score (requires -doCounts; output is .qs file); similar to MapQ but for the base call in the mapped read
+# -doDepth 1 : returns the depth distribution (outputs are .depthSample and .depthGlobal)
+TODO="-doQsDist 1 -doDepth 1 -doCounts 1 -dumpCounts 2"
+
+
+# in the following line, -r argument is one chromosome or contig to work with (no need to do this for whole genome as long as the chosen chromosome or contig is long enough)
+# (look up lengths of your contigs in the header of *.sam files)
+angsd -b bams -r chr1 -GL 1 $FILTERS $TODO -P 1 -out dd 
+
+
+# summarizing results (using modified script by Matteo Fumagalli)
+~/bin/plotQC.R dd > qranks
+# proportion of sites covered at >5x:
+cat qranks
+
+# scp dd.pdf to laptop to look at distribution of base quality scores, fraction of sites in each sample passing coverage thresholds, and fraction of sites passing genotyping rates cutoffs. 
+#Use these to guide choices of -minQ,  -minIndDepth and -minInd filters in subsequent ANGSD runs
+
+#DECISIONS BASED ON QUALITY (chose same for both):
+	#nesticus:
+		#qscore cutoff = 32
+		#depth = 6
+		#genotyping rate = 0.8
+		
+	#ptomaphagus:
+		#qscore cutoff = 32
+		#depth = 6
+		#genotyping rate = 0.8
+
+
+
+#######################################################
+############## ALLELE FREQUENCIES AND FST #############
+#######################################################
+
+#set up populations
+ls *.bam > bams
+grep BT bams > BT.txt
+grep GV bams > GV.txt
+grep SB bams > SB.txt
+grep ST bams > ST.txt
+
+#first calculate per pop saf for each populatoin (note that this is done as a polarized SFS, but then you fold it when you call realSFS)
+angsd -b BT.txt -anc cdh_alltags_cc.fasta -out BT -dosaf 1 -gl 1
+angsd -b GV.txt -anc cdh_alltags_cc.fasta -out GV -dosaf 1 -gl 1
+angsd -b SB.txt -anc cdh_alltags_cc.fasta -out SB -dosaf 1 -gl 1
+angsd -b ST.txt -anc cdh_alltags_cc.fasta -out ST -dosaf 1 -gl 1
+
+
+#calculate all pairwise 2dsfs's
+realSFS BT.saf.idx GV.saf.idx -fold 1 -P 12 >BT.GV.ml
+realSFS BT.saf.idx SB.saf.idx -fold 1 -P 12 >BT.SB.ml
+realSFS GV.saf.idx SB.saf.idx -fold 1 -P 12 >GV.SB.ml
+
+
+#prepare the fst for easy analysis
+realSFS fst index BT.saf.idx GV.saf.idx SB.saf.idx -sfs BT.GV.ml -sfs BT.SB.ml -sfs GV.SB.ml -fstout here -fold 1
+
+
+#get result
+realSFS fst stats here.fst.idx
+
+#currently am not using this, but keeping the steps for reference
+
+
+#######################################################
+################## PCA AND ADMIXTURE ##################
+#######################################################
+
+#Here use only non-rep samples
+#maybe easiest here to set the 
+
+
+#SET UP VARIABLES FOR CHOSEN FILTERING PARAMETERS
+
+MINQ=35 #(use for both species)
+MININD=37 #80% of 46 samples (for Nesticus)
+MININD=26 #80% of 32 samples (for Ptomaphagus)
+
+
+#------ GENERATE GENOTYPE LIKELIHOODS FOR IBS ------#
+		
+# Note: PCA and Admixture are not supposed to be run on data that contain clones or genotyping replicates. 
+#For PCA, these can be removed without rerunning ANGSD from the IBS distance matrix; but for ngsAdmix ANGSD must be rerun.
+
+# Generating genotype likelihoods from highly confident (non-sequencing-error) SNPs
+# set minInd to 75-80% of your total number of bams
+# if you expect very highly differentiated populations with nearly fixed alternative alleles, remove '-hwe_pval 1e-5' form FILTERS
+# -doGeno 8 : genotype likelihood format setting for ngsLD; if you want to run PCA, use -doGeno 32 (but I recommend using ibsMat for all ordination work)
+
+
+FILTERS="-uniqueOnly 1 -remove_bads 1 -minMapQ 20 -minQ $MINQ -dosnpstat 1 -doHWE 1 -sb_pval 1e-5 -hetbias_pval 1e-5 -skipTriallelic 1 -minInd $MININD -snp_pval 1e-5 -minMaf 0.01"
+TODO="-doMajorMinor 1 -doMaf 1 -doCounts 1 -makeMatrix 1 -doIBS 1 -doCov 1 -doGeno 8 -doVcf 1 -doPost 1 -doGlf 2"
+
+# Starting angsd with -P the number of parallel processes. Funny but in many cases angsd runs faster on -P 1
+angsd -b bams -GL 1 $FILTERS $TODO -P 1 -out ibsResults
+
+
+#output:
+	ibsResults.arg        -- recap on run
+	ibsResults.beagle.gz  -- genotype likelihoods. 3 columns per sample give likelihoods for AA, Aa, and aa where 'A' is major allele and 'a' is minor
+	ibsResults.covMat     -- covariance matrix for genotypes, can be used for PCA
+	ibsResults.geno.gz    -- 
+	ibsResults.hwe.gz
+	ibsResults.ibs.gz     -- 
+	ibsResults.ibsMat     -- identity by state matrix. This can be used for hierarchical clustering and PCA-like plots
+	ibsResults.mafs.gz    -- minor allele frequencies
+	ibsResults.snpStat.gz
+	ibsResults.vcf.gz     -- angsd-style VCF with normalized genotype likelihoods included
+
+
+#how many SNPS did we get?
+NSITES=`zcat ibsResults.mafs.gz | wc -l`
+echo $NSITES
+
+#Nesticus = 13629
+#Ptomaphagus = 31000
+
+#------ GENERATE GENOTYPE LIKELIHOODS FOR PCA ------#
+
+#This is identical to the step above, only use -doGeno 32
+
+
+FILTERS="-uniqueOnly 1 -remove_bads 1 -minMapQ 20 -minQ $MINQ -dosnpstat 1 -doHWE 1 -sb_pval 1e-5 -hetbias_pval 1e-5 -skipTriallelic 1 -minInd $MININD -snp_pval 1e-5 -minMaf 0.01"
+TODO="-doMajorMinor 1 -doMaf 1 -doCounts 1 -makeMatrix 1 -doIBS 1 -doCov 1 -doGeno 32 -doVcf 1 -doPost 1 -doGlf 2"
+
+# Starting angsd with -P the number of parallel processes. Funny but in many cases angsd runs faster on -P 1
+angsd -b bams -GL 1 $FILTERS $TODO -P 1 -out PCAResults
+
+
+#output:
+	PCAResults.arg        -- recap on run
+	PCAResults.beagle.gz  -- genotype likelihoods. 3 columns per sample give likelihoods for AA, Aa, and aa where 'A' is major allele and 'a' is minor
+	PCAResults.covMat     -- covariance matrix for genotypes, can be used for PCA
+	PCAResults.geno.gz    -- 
+	PCAResults.hwe.gz
+	PCAResults.ibs.gz     -- 
+	PCAResults.ibsMat     -- identity by descent matrix. This can be used for PCA-like plots
+	PCAResults.mafs.gz    -- minor allele frequencies
+	PCAResults.snpStat.gz
+	PCAResults.vcf.gz     -- angsd-style VCF with normalized genotype likelihoods included
+
+
+#------------------ ADMIXTURE ------------------#
+
+#USE NGS ADMIXTURE ON GENOTYPE LIKELIHOODS TO INCLUDE UNCERTAINTY
+
+for K in `seq 2 5` ; 
+do 
+NGSadmix -likes ibsResults.beagle.gz -K $K -P 10 -o mydata_k${K};
+done
+
+
+#outputs (one for each k):
+	mydata_k2.filter
+	mydata_k2.fopt.gz   -- estimation of the allele frequencies in each of the ancestral populations (each column is a population, each row a SNP)
+	mydata_k2.log       -- log of the run
+	mydata_k2.qopt      -- Infered admixture proportions. Each line is an individual and each column is a population.
+	
+
+#send the following files to PC for plotting with plot_ngsAdmix.R and angsd_ibs_pca.R:
+*.qopt, *Mat, bams
+
+
+#--------------- RELATEDNESS ---------------#
+
+#First have to re-run angsd with '-doGlf 3' argument:
+
+FILTERS="-uniqueOnly 1 -remove_bads 1 -minMapQ 20 -minQ 25 -dosnpstat 1 -doHWE 1 -sb_pval 1e-5 -hetbias_pval 1e-5 -skipTriallelic 1 -minInd 36 -snp_pval 1e-5 -minMaf 0.01"
+TODO="-doMajorMinor 1 -doMaf 1 -doCounts 1 -makeMatrix 1 -doIBS 1 -doCov 1 -doGeno 8 -doVcf 1 -doPost 1 -doGlf 3"
+angsd -b bams -GL 1 $FILTERS $TODO -P 1 -out myresult
+
+
+
+#now get relatedness
+zcat myresult.mafs.gz | cut -f5 |sed 1d >freq
+NIND=`cat bams | wc -l`
+ngsRelate -f freq -g myresult.glf.gz -n $NIND -z bams >relatedness.tsv
+
+#output:
+#output file has numerous measures of relatedness between each pair of samples
+	relatedness.tsv
+	
+
+
+
+
+######################################################
+############# ANGSD DEMOGRAPHIC ANALYSIS #############
+######################################################
+
+
+#--------------- SFS FOR DEMOGRAPHIC -----------------#
+
+# ANDSD => SFS for demographic analysis
+
+#set up new dir and get bams
+mkdir sfs_demographic
+ln -s ../bamfiles/*.bam .
+
+
+#SET UP VARIABLES FOR CHOSEN FILTERING PARAMETERS (from above)
+#For nesticus
+MINQ=35
+MININD=37 #80% of 48 samples
+
+
+# generating list of filtered SNP sites for SFS production (note: no filters that distort allele frequency!):
+# sb - strand bias filter; only use for 2bRAD, GBS or WGS (not for ddRAD or RADseq)
+# hetbias - detects weird heterozygotes because they have unequal representation of alleles 
+# set minInd to 80-90% of all your individuals (depending on the results from quality control step)
+FILTERS="-uniqueOnly 1 -remove_bads 1  -skipTriallelic 1 -minMapQ 20 -doHWE 1 -sb_pval 1e-5 -hetbias_pval 1e-5 -minQ $MINQ -minInd $MININD"
+TODO="-doMajorMinor 1 -doMaf 1 -dosnpstat 1 -doPost 2 -doGeno 11"
+# ANGSD command:
+angsd -b bams -GL 1 -P 1 $FILTERS $TODO -out sfilt
+
+# filtering out sites where heterozygotes likely comprise more than 50% of all genotypes (likely lumped paralogs)
+# (this fuzzy procedure and HetMajorityProb.py script have been developed by Nathaniel "Nate" S. Pope, nspope@utexas.edu, at UT Austin) 
+# NOTE: this step requires python with numpy and scipy; also the file poibin.py (included in the repo) should be placed in your PYTHONPATH
+zcat sfilt.geno.gz | python ~/bin/HetMajorityProb.py > hetProbResults.tsv
+awk '$6 < 0.75 {print $1"\t"$2}' hetProbResults.tsv > allSites
+angsd sites index allSites
+
+
+
+# make separate files listing bams for each population (without clones and replicates)
+
+ls NBBT*.bam | grep -v rep > BT.bams
+ls NBGV*.bam | grep -v rep > GV.bams
+ls NBSB*.bam | grep -v rep > SB.bams
+ls NBST*.bam | grep -v rep > ST.bams
+wc -l *.bams
+
+
+#ESTIMATE SITE FREQUENCY LIKELIHOODS FOR EACH POPULATION, ALSO SAVING ALLELE FREQUENCIES
+
+#set up run parameters
+export GENOME_REF=cdh_alltags_cc.fasta
+TODO="-doSaf 1 -doMajorMinor 1 -doMaf 1 -doPost 1 -anc $GENOME_REF -ref $GENOME_REF"
+
+#build job file to run angsd for each population
+echo "angsd -sites allSites -b BT.bams -GL 1 -P 1 $TODO -out BT
+angsd -sites allSites -b GV.bams -GL 1 -P 1 $TODO -out GV
+angsd -sites allSites -b SB.bams -GL 1 -P 1 $TODO -out SB
+angsd -sites allSites -b ST.bams -GL 1 -P 1 $TODO -out ST" > get_freq_likes
+
+launcher_creator.py -n get_freq_likes -j get_freq_likes -q normal -N 2 -w 2 -a $allo -e $email -t 03:00:00
+sbatch get_freq_likes.slurm
+
+
+
+# generating per-population SFS
+echo "realSFS BT.saf.idx >BT.sfs
+realSFS GV.saf.idx >GV.sfs
+realSFS SB.saf.idx >SB.sfs
+realSFS ST.saf.idx >ST.sfs" > get_realSFS
+
+launcher_creator.py -n get_realSFS -j get_realSFS -q normal -N 2 -w 2 -a $allo -e $email -t 02:00:00
+
+
+#We want to run for each pair, so some of the following commands are set to run from a pair table and pops table:
+echo "\
+BT	GV
+BT	SB
+BT	ST
+GV	SB
+GV	ST
+SB	ST" >pairs.txt
+
+
+# generating dadi-like posterior counts based on sfs priors
+export GENOME_REF=cdh_alltags_cc.fasta
+realSFS dadi BT.saf.idx GV.saf.idx -sfs BT.sfs -sfs GV.sfs -ref $GENOME_REF -anc $GENOME_REF > BT_GV_dadiout &
+realSFS dadi BT.saf.idx SB.saf.idx -sfs BT.sfs -sfs SB.sfs -ref $GENOME_REF -anc $GENOME_REF > BT_SB_dadiout &
+realSFS dadi BT.saf.idx ST.saf.idx -sfs BT.sfs -sfs ST.sfs -ref $GENOME_REF -anc $GENOME_REF > BT_ST_dadiout &
+realSFS dadi GV.saf.idx SB.saf.idx -sfs GV.sfs -sfs SB.sfs -ref $GENOME_REF -anc $GENOME_REF > GV_SB_dadiout &
+realSFS dadi GV.saf.idx ST.saf.idx -sfs GV.sfs -sfs ST.sfs -ref $GENOME_REF -anc $GENOME_REF > GV_ST_dadiout &
+realSFS dadi SB.saf.idx ST.saf.idx -sfs SB.sfs -sfs ST.sfs -ref $GENOME_REF -anc $GENOME_REF > SB_ST_dadiout &
+
+#or use awk to print the same:
+awk 'BEGIN {OFS=""}
+ {print "realSFS dadi ",$1,".saf.idx ",$2,".saf.idx -sfs ",$1".sfs -sfs ",$2,".sfs -ref $GENOME_REF -anc $GENOME_REF > ",$1,"_",$2,"dadiout &"}' pairs.txt
+
+
+# (numbers after the input file name are numbers of individuals sampled per population)
+nBT=$(cat BT.bams | wc -l)
+nGV=$(cat GV.bams | wc -l)
+nSB=$(cat SB.bams | wc -l)
+nST=$(cat ST.bams | wc -l)
+
+
+# converting to dadi-snp format understood by dadi an Moments:
+
+realsfs2dadi.pl BT_GV_dadiout $nBT $nGV > BT_GV_dadi.data
+realsfs2dadi.pl BT_SB_dadiout $nBT $nSB > BT_SB_dadi.data
+realsfs2dadi.pl BT_ST_dadiout $nBT $nST > BT_ST_dadi.data
+realsfs2dadi.pl GV_SB_dadiout $nGV $nSB > GV_SB_dadi.data
+realsfs2dadi.pl GV_ST_dadiout $nGV $nST > GV_ST_dadi.data
+realsfs2dadi.pl SB_ST_dadiout $nSB $nST > SB_ST_dadi.data
+
+
+
+#At this point, make a subdirectory for each pair of populations, and 
+#move the *_dadi.data and *.bams files for each pair into them to run moments
+
+
+#pick pops
+pop0="BT"
+pop1="ST"
+
+
+#eg:
+DIR=${pop0}_${pop1}_moments
+mkdir $DIR
+mv ${pop0}_${pop1}_dadi.data $DIR
+cp ${pop0}.bams $DIR
+cp ${pop1}.bams $DIR
+
+
+#---- GET FST USING THE ALLELE FREQUENCY SPECTRA ----#
+#Angsd can get FST estimates based on the allele frequency spectra as well
+#As this uses a lot of the same input files, its easiest to run it here
+
+#calculate the 2dsfs prior
+realSFS BT.saf.idx GV.saf.idx > BT.GV.ml
+
+#prepare the fst for easy window analysis etc
+realSFS fst index BT.saf.idx GV.saf.idx -sfs BT.GV.ml -fstout BT.GV
+
+
+realSFS fst stats BT.GV.fst.idx
+
+
+#---------------------------------------------------#
+
+
+
+#################################################
+######### 2d AFS analysis using Moments #########
+#################################################
+
+# get Misha's Moments scripts collection
+git clone https://github.com/z0on/AFS-analysis-with-moments.git
+# set your $PATH to include the AFS-analysis-with-moments directory
+
+#BUILD FOLDED ALLELE FREQUENCY SPECTRA
+
+#set pop1 and pop2 variables for the pair you're working with
+pop0="BT"
+pop1="GV"
+dadiData=${pop0}_${pop1}_dadi.data
+
+
+# (change numbers to 2 x 0.9 x number of samples for in each pop; n0 for pop0 and n1 for pop1):
+#following awk stuff should return that value, but probably worth checking
+n0=`echo - | awk -v N="$(cat ${pop0}.bams | wc -l)" '{printf "%3.0f\n", N * 2 * 0.9}'`
+n1=`echo - | awk -v N="$(cat ${pop1}.bams | wc -l)" '{printf "%3.0f\n", N * 2 * 0.9}'`
+echo $n0
+echo $n1
+
+# print folded 2d SFS - for denovo or when mapping to genome of the studied species
+2dAFS_fold.py $dadiData pop0 pop1 $n0 $n1
+
+
+
+# ------ multimodel inference: fit a diversity of 2-population models, then select the best one based on AIC.
+# there are models with a period of exponential growth ("IM" models), models with one, two or three different size and/or migration rate epochs ("SC" models, including models with no migration in some epochs), models with symmetrical migration ("sm" models, in other cases migration is asymmetrical), models with two types of genomic loci ("genomic islands") introgressing at different rates ("i" models), and some fun combinations thereof.
+# differences between models are summarized in excel table moments_multimodels.xls
+
+# read about multimodel inference here: 
+# https://pdfs.semanticscholar.org/a696/9a3b5720162eaa75deec3a607a9746dae95e.pdf
+
+# this HAS to be parallelized - we need to fit ~100 models 10 times to make sure each model converges at its best fit at least once.
+
+# input line: the last four numbers are:
+# - projections (2 x 0.9 x number of samples) for in each pop;
+# - mutation rate per gamete per generation 
+		#Here I used the mutation rate estimate for Dropsophia 4.65E-9 mutations/bp/generation;
+		#This is reasonably close to an estimate of 5.4e-9 mutations per year for Stegodyphus spiders from Mattila et al. 2012
+		#and an estimated genome size of 1.34 Gb. I got this by taking the mean genome size (1.371 pg) for the family Linyphiidae from Gregory and Shorthouse 2003 and multiplying by 978 Mb based on PMID: 12541287
+		#This genome size estimate is comparable to the value of 1443.9 Mb given for the House spider here: https://doi.org/10.1186/s12915-017-0399-x 
+		# (4.65E-9 mutations / bp) * (1.34E9 bp / gamete) = 6.231 mutations / gamete
+		#but then we only see about 1/1000th of the genome with RAD, so this comes to:
+		#0.006
+		#This is lower than Misha's suggested value fo 0.02
+# - generation time, in thousand years -- (From Hedin 1997: 1 generation per year is a conservative estimate, so it may be a little less)
+
+IN="${dadiData} pop0 pop1 $n0 $n1 0.006 0.001"
+
+# after setting the $IN variable, execute all commands listed in the text file "allmodels_unfolded" (if your alleles are polarized into ancestral and derived, for example by mapping to a sister species genome) or "allmodels_folded" 
+awk -v IN="$IN" '{print $0,IN}' ~/AFS-analysis-with-moments/multimodel_inference/allmodels_folded > runModels
+launcher_creator.py -n ${pop0}_${pop1}_models -j runModels -q normal -N 11 -w 10 -a $allo -e $email -t 12:00:00
+sbatch runModels.slurm
+
+
+#the results will be in the most recent runModels.o* files
+
+#FORMAT THE RESULTS FROM RUNNING ALL THE MODELS
+
+#set the raw results text file name
+RAW="GV_SB_models.o2222237"
+
+#parse out results
+cat $RAW | perl -pe 's/RESULT(.+)(\d)\n/RESULT$1$2/' |perl -pe 's/RESULT(.+)(\d)\n/RESULT$1$2/' |perl -pe 's/RESULT(.+)(\d)\n/RESULT$1$2/' | perl -pe 's/RESULT(.+)([\d\s])\n/RESULT$1$2/' | grep RESULT > mmods.res
+
+# extracting likelihoods and parameter numbers for AIC:
+cut -f 2,3,4,5 -d " " mmods.res >likes.tsv
+
+# use R script deltaAIC_multimodels.R to find best-fitting model.
+# using model ID number that the R script will list: 
+# - examine the model's graphic output (*.pdf of actual and modeled SFS, and *.png of the model graph)
+# - grep fitted model parameters and their SDs from *.mom files
+
+# the order of parameters are listed in files unfolded_params and folded_params. Typically pop size parameters are first, then times, then migration rates, then the fraction of genomic "islands" (in "i"  models), then percentage of misidentified ancestral states (in unfolded models).
+
+
+
+#################################################
+######## AFS FROM HARD-CALLED GENOTYPES #########
+#################################################
+
+#SET UP THE INPUT FILES FROM THE MPILEUP VCF
+
+
+
+#choose the two populations this one is for
+pop0="SB"
+pop1="ST"
+
+#build inds2pops table for the chosen pair
+grep CHROM filt3.vcf | tr "\t" "\n" | grep NB | awk '{split($1, a, "NB"); print $1"\t"substr(a[2], 1,2)}' > fullInds2pops
+grep -w $pop0 fullInds2pops > ${pop0}.samples
+grep -w $pop1 fullInds2pops > ${pop1}.samples
+cat ${pop0}.samples ${pop1}.samples > inds2pops
+
+
+#make dadi input for each pair of populations
+cut -f 1 inds2pops > keep
+vcftools --vcf filt3.vcf --keep keep --recode --out ${pop0}_${pop1}
+vcf2dadi.pl ${pop0}_${pop1}.recode.vcf inds2pops
+
+
+#BUILD FOLDED ALLELE FREQUENCY SPECTRA
+#set pop1 and pop2 variables for the pair you're working with
+dadiData=${pop0}_${pop1}_dadi.data
+
+
+# (change numbers to 2 x 0.9 x number of samples for in each pop; n0 for pop0 and n1 for pop1):
+#following awk stuff should return that value, but probably worth checking
+n0=`echo - | awk -v N="$(cat ${pop0}.samples | wc -l)" '{printf "%3.0f\n", N * 2 * 0.9}'`
+n1=`echo - | awk -v N="$(cat ${pop1}.samples | wc -l)" '{printf "%3.0f\n", N * 2 * 0.9}'`
+
+echo $n0
+echo $n1
+
+# print folded 2d SFS - for denovo or when mapping to genome of the studied species
+2dAFS_fold.py $dadiData $pop0 $pop1 $n0 $n1
+
+
+# ------ multimodel inference:
+
+IN="${dadiData} $pop0 $pop1 $n0 $n1 0.006 0.001"
+
+# after setting the $IN variable, execute all commands listed in the text file "allmodels_unfolded" (if your alleles are polarized into ancestral and derived, for example by mapping to a sister species genome) or "allmodels_folded" 
+awk -v IN="$IN" '{print $0,IN}' ~/AFS-analysis-with-moments/multimodel_inference/allmodels_folded > runModels
+launcher_creator.py -n sbst -j runModels -q normal -N 5 -w 10 -a $allo -e $email -t 12:00:00
+sbatch runModels.slurm
+
+
+#the results will be in the most recent runModels.o* files
+
+#FORMAT THE RESULTS FROM RUNNING ALL THE MODELS
+
+#set the raw results text file name
+RAW="sbst.o2218384"
+
+#parse out results
+cat $RAW | perl -pe 's/RESULT(.+)(\d)\n/RESULT$1$2/' |perl -pe 's/RESULT(.+)(\d)\n/RESULT$1$2/' |perl -pe 's/RESULT(.+)(\d)\n/RESULT$1$2/' | perl -pe 's/RESULT(.+)([\d\s])\n/RESULT$1$2/' | grep RESULT > mmods.res
+
+# extracting likelihoods and parameter numbers for AIC:
+cut -f 2,3,4,5 -d " " mmods.res >likes
+
+# use R script deltaAIC_multimodels.R to find best-fitting model.
+# using model ID number that the R script will list: 
+# - examine the model's graphic output (*.pdf of actual and modeled SFS, and *.png of the model graph)
+# - grep fitted model parameters and their SDs from *.mom files
+
+# the order of parameters are listed in files unfolded_params and folded_params. Typically pop size parameters are first, then times, then migration rates, then the fraction of genomic "islands" (in "i"  models), then percentage of misidentified ancestral states (in unfolded models).
+
+
+
+
+
+
