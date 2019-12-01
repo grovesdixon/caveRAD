@@ -717,8 +717,8 @@ realSFS dadi GV.saf.idx ST.saf.idx -sfs GV.sfs -sfs ST.sfs -ref $GENOME_REF -anc
 realSFS dadi SB.saf.idx ST.saf.idx -sfs SB.sfs -sfs ST.sfs -ref $GENOME_REF -anc $GENOME_REF > SB_ST_dadiout &
 
 #or use awk to print the same:
-awk 'BEGIN {OFS=""}
- {print "realSFS dadi ",$1,".saf.idx ",$2,".saf.idx -sfs ",$1".sfs -sfs ",$2,".sfs -ref $GENOME_REF -anc $GENOME_REF > ",$1,"_",$2,"dadiout &"}' pairs.txt
+#awk 'BEGIN {OFS=""}
+# {print "realSFS dadi ",$1,".saf.idx ",$2,".saf.idx -sfs ",$1".sfs -sfs ",$2,".sfs -ref $GENOME_REF -anc $GENOME_REF > ",$1,"_",$2,"dadiout &"}' pairs.txt
 
 
 # (numbers after the input file name are numbers of individuals sampled per population)
@@ -742,36 +742,12 @@ realsfs2dadi.pl SB_ST_dadiout $nSB $nST > SB_ST_dadi.data
 #At this point, make a subdirectory for each pair of populations, and 
 #move the *_dadi.data and *.bams files for each pair into them to run moments
 
-
-#pick pops
-pop0="BT"
-pop1="ST"
-
-
-#eg:
-DIR=${pop0}_${pop1}_moments
-mkdir $DIR
-mv ${pop0}_${pop1}_dadi.data $DIR
-cp ${pop0}.bams $DIR
-cp ${pop1}.bams $DIR
-
-
-#---- GET FST USING THE ALLELE FREQUENCY SPECTRA ----#
-#Angsd can get FST estimates based on the allele frequency spectra as well
-#As this uses a lot of the same input files, its easiest to run it here
-
-#calculate the 2dsfs prior
-realSFS BT.saf.idx GV.saf.idx > BT.GV.ml
-
-#prepare the fst for easy window analysis etc
-realSFS fst index BT.saf.idx GV.saf.idx -sfs BT.GV.ml -fstout BT.GV
-
-
-realSFS fst stats BT.GV.fst.idx
-
-
-#---------------------------------------------------#
-
+cat pairs.txt | \
+awk 'BEGIN {FS="."}
+{print "mkdir "$1"_"$2"_moments"
+print "mv",$1"_"$2"_dadi.data "$1"_"$2"_moments"
+print "cp",$1".bams",$1"_"$2"_moments"
+print "cp",$2".bams",$1"_"$2"_moments"}' > setupDirs
 
 
 #################################################
