@@ -6,6 +6,7 @@ library(tidyverse)
 library(vegan)
 library(adegenet) 
 library(cowplot)
+theme_set(theme_cowplot())
 
 
 

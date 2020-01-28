@@ -44,7 +44,7 @@ names(n.splots)=c('k2', 'k3', 'k4', 'k5')
 plts=plot_grid(plotlist=n.splots, nrow=2, rel_widths=c(1, 0.75))
 ylab = ggdraw() + draw_label(YLAB, angle=90)
 top0=plot_grid(ylab, plts, nrow=1, rel_widths=c(1, 25))
-title=ggdraw() + draw_label('Nesticus', fontface='italic')
+title=ggdraw() + draw_label('N. barri', fontface='italic')
 n.plt=plot_grid(title, top0, nrow=2, rel_heights=c(1,15))
 # n.plt
 
@@ -76,7 +76,7 @@ names(n.splots)=c('k2', 'k3', 'k4', 'k5')
 
 #plot the list of plots
 plts=plot_grid(plotlist=p.splots, nrow=2)  
-title=ggdraw() + draw_label('Ptomaphagus', fontface='italic')
+title=ggdraw() + draw_label('P. hatchi', fontface='italic')
 p.plt=plot_grid(title, plts, nrow=2, rel_heights=c(1,15))
 # p.plt
 

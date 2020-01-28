@@ -1,0 +1,5 @@
+﻿cave,survey,length_ft,watershed,dist_ST,dist_SB,dist_GV,dist_BT
+ST,TFR26,1213,Upper Elk River,0,3.3,6,12.6
+SB,TFR91,4000,Upper Elk River,3.3,0,3.2,9.3
+GV,TFR423,1607,Guntersville Lake,6,3.2,0,7.4
+BT,TFR16,10307,Guntersville Lake,12.6,9.3,9.3,0

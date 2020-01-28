@@ -44,22 +44,23 @@ my_plot_hclust = function(hc, groupLabel){
     theme(legend.position = 'none')
 }
 
-YLIM = c(-0.07, 0.36)
+NYLIM = c(-0.07, 0.36)
+PYLIM = c(-0.07, 0.20)
 REL_HEIGHTS = c(1,8)
 
 #nesticus
 n.tree0 = my_plot_hclust(n.hc, n.site)
 n.tree1 = n.tree0 +
-  lims(y=YLIM)
-n.main = ggdraw() + draw_label('Nesticus', fontface='italic')
+  lims(y=NYLIM)
+n.main = ggdraw() + draw_label('N. barri', fontface='italic')
 n.tree= plot_grid(n.main, n.tree1, nrow=2, rel_heights = REL_HEIGHTS)
 n.tree
 
 #ptomaphagus
 p.tree0 = my_plot_hclust(p.hc, p.site)
 p.tree1 = p.tree0 +
-  lims(y=YLIM)
-p.main = ggdraw() + draw_label('Ptomaphagus', fontface='italic')
+  lims(y=PYLIM)
+p.main = ggdraw() + draw_label('P. hatchi', fontface='italic')
 p.tree= plot_grid(p.main, p.tree1, nrow=2, rel_heights = REL_HEIGHTS)
 p.tree
 
