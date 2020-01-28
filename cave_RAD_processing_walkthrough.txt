@@ -776,6 +776,11 @@ realSFS ST.saf.idx >ST.sfs" > get_realSFS
 
 launcher_creator.py -n get_realSFS -j get_realSFS -q normal -N 2 -w 2 -a $allo -e $email -t 02:00:00
 
+#--------------------------------------------------------#
+#------------- USE outputs to calculate FST -------------#
+#--------------------------------------------------------#
+
+
 
 #--------------------------------------------------------#
 #--- USE THE sfs outputs to calculate theta estimates ---#
@@ -800,6 +805,8 @@ done < pops.txt
 
 #----------------------------------------------------------#
 #----------------------------------------------------------#
+
+
 
 
 #CONTINUE FOR OTHER STATS

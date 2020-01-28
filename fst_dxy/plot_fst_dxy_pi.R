@@ -220,25 +220,6 @@ final = plot_grid(pans,xlab,nrow=2,rel_heights = c(12,1))
 final
 
 
-
-# GET DXY FROM ANSD ALLELE FREQUENCIES ------------------------------------
-
-pops = c('BT','GV','SB','ST')
-spp = 'nesticus'
-mafs = data.frame()
-for (ipop in pops){
-  inPath = paste('fst_dxy/', spp, sep='/')
-  inFile = paste('fst_dxy/', spp, '/', ipop, '.mafs', sep='')
-  pmaf = read.table()
-}
-
-mafIn = pMafIn
-
-maf = read_tsv(mafIn)
-
-
-
-
 # ASSEMBLE TABLE OF DIVERGENCE ESTIMATES ----------------------------------
 
 #GET THE VCFTOOLS RESULTS
@@ -399,4 +380,80 @@ sdat %>%
   ggplot(aes(x=dist,y=mnStat,color=group, shape=spp)) +
   geom_point(size=5) +
   geom_smooth(se=FALSE)
+
+
+
+# GET DXY FROM ANSD ALLELE FREQUENCIES ------------------------------------
+#didn't end up using this, but keeping for reference
+
+pops = c('BT','GV','SB','ST')
+spp = 'nesticus'
+
+#Funciton to read in and merge minor allele frequency data from each population
+#these maf files are generated under the ANGSD DEMOGRAPHIC ANALYSIS section in cave_RAD_processing_walkthrough.txt
+read_in_mafs = function(pops, spp){
+  mafList = list()
+  for (ipop in pops){
+    print(paste('Reading in ', ipop, '...', sep=''))
+    inFile = paste('large_ignored/', spp, '/', ipop, '.mafs', sep='')
+    pmaf = read.table(inFile, header=TRUE) %>% 
+      dplyr::select(chromo,position,minor,ref,anc,knownEM) %>% 
+      set_names(c('chromo',
+                  'position',
+                  paste(ipop, 'minor', sep='.'),
+                  'ref',
+                  'anc',
+                  paste(ipop, 'freq', sep='.')))
+    mafList[[ipop]] = pmaf
+  }
+  mafs = purrr::reduce(mafList, left_join, by=c('chromo','position','ref','anc'))
+  return(mafs)
+}
+
+nmaf = read_in_mafs(pops, 'nesticus') %>% 
+  na.omit()
+pmaf = read_in_mafs(pops, 'ptomaphagus') %>% 
+  na.omit()
+
+
+
+get_ansd_dxy = function(mafDat, pops){
+  dxyRes = data.frame()
+  for (c1 in pops){
+    otherPops = pops[pops != c1]
+    for (c2 in otherPops){
+      pair=paste(c1,c2,sep='-')
+      print(paste('Running dxy for pair ',pair,'...', sep=''))
+      ma.x = mafDat[,paste(c1,'minor',sep='.')] #minor allele for population x
+      maf.x = mafDat[,paste(c1,'freq',sep='.')] 
+      maj.x = 1-maf.x
+      ma.y = mafDat[,paste(c2,'minor',sep='.')]
+      maf.y = mafDat[,paste(c2,'freq',sep='.')]
+      maj.y = 1-maf.y
+      k = ma.x==ma.y
+      
+      dxyDat = data.frame(ma.x,
+                          maf.x,
+                          maj.x,
+                          ma.y,
+                          maf.y,
+                          maj.y,
+                          k)
+      dxyDat$dxy = 
+        maf.x*maf.y*as.numeric(!k) +  #multiply by 0 if minor allele is the same or 1 if different
+        maf.x*maj.y*as.numeric(k) +  #multiply by 1 if minor allele is the same or 0 if different
+        maj.x*maj.y*as.numeric(!k) +
+        maj.x*maf.y*as.numeric(k)
+      mnDxy = mean(dxyDat$dxy,
+                   na.rm=TRUE)
+      subRes = data.frame(group=pair,
+                          dxy = mnDxy)
+      dxyRes = rbind(dxyRes, subRes)
+    }
+  }
+  return(dxyRes)
+}
+
+ndxy = get_ansd_dxy(nmaf, pops)
+pdxy = get_ansd_dxy(pmaf, pops)
 
