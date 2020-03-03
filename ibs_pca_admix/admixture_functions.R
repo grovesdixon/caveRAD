@@ -69,15 +69,18 @@ sort_by_pop_props = function(dat){
 plot_admix_samples = function(dfName){
   dat=dfList[[dfName]]
   seg.df = get_segment_coords(dat$cave)
-  dat %>%
+  formdat = dat %>%
     sort_by_pop_props() %>% 
     mutate(num=1:nrow(dat)) %>% 
-    gather(key='pop', value='proportion', grep('pop', colnames(dat))) %>%
+    gather(key='pop', value='proportion', grep('pop', colnames(dat))) %>% 
+    mutate(cave=factor(cave, levels=c('BT', 'GV', 'SB', 'ST')),
+           pop=factor(pop, levels=unique(pop)))
+  formdat %>%
     ggplot() +
     geom_bar(aes(x=num, y=proportion, fill=pop), stat="identity", width=1.0) +
     labs(x='Sample', y='Admixture', subtitle=dfName) +
     scale_x_continuous(breaks = seg.df$lab.xs, labels=seg.df$site) +
     geom_segment(aes(x=x1, xend=x2, y=y1, yend=y2), data=seg.df, lwd=0.5) +
     theme(legend.position='none',
-          axis.title = element_blank())
+          axis.title = element_blank()) 
 }

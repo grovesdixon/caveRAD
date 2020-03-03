@@ -1,5 +1,6 @@
 #plot_fst_dxy.R
-
+#plot this a bunch of ways trying to figure out what looks nice
+#none particularly do, so went with barplot
 
 library(tidyverse)
 library(cowplot)
@@ -296,6 +297,9 @@ ddat %>%
        y='')
 
 
+
+# PLOT SELECTED FIGURE ----------------------------------------------------
+
 #barplots of weighted
 barplot_fst = function(fstdat, diffStat){
   share = c('BT-GV',
@@ -332,14 +336,16 @@ ndxy = barplot_fst(ndist, 'dxy') +
 pdxy = barplot_fst(pdist, 'dxy') +
   labs(y=bquote(d[XY]))
 
-l=cowplot::get_legend(nweight)
+l=cowplot::get_legend(nweight + labs(fill='cave'))
 pltList = list(nweight,pweight,nfst,pfst,ndxy,pdxy)
 modList = lapply(pltList, function(x) x+theme(legend.position = 'none',
                                               axis.title.x = element_blank()))
 plts=plot_grid(plotlist = modList, nrow=3)
-xlab = ggdraw() + draw_label('cave1')
-top=plot_grid(plts, xlab, nrow=2, rel_heights=c(20,1))
-plot_grid(top,l, nrow=1, rel_widths = c(6,1))
+# xlab = ggdraw() + draw_label('cave1') #decided not to use this
+# top=plot_grid(plts, xlab, nrow=2, rel_heights=c(20,1))
+plot_grid(plts,l, nrow=1, rel_widths = c(6,1))
+
+
 
 # PLOT AGAINST CAVE DATA --------------------------------------------------
 #BY WATERSHED

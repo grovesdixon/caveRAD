@@ -238,7 +238,20 @@ noAll %>%
 
 
 
-
+#look at plot without log transform
+#build plot
+noAll %>% 
+  ggplot(aes(x=length_m, y=angsd.pi)) +
+  geom_smooth(se=FALSE, color='black') +
+  geom_point(aes(shape=spp2, color=cave), size=6) +
+  labs(x='cave length (m)',
+       y=expression(pi),
+       shape='species') +
+  # scale_x_continuous(breaks = seq(minl, maxl, length.out=4),
+  #                    labels = unlog,
+  #                    limits = c(minl-xbuff, maxl+xbuff)) +
+  scale_y_continuous(labels = function(x) format(x, scientific = TRUE)) +
+  theme(axis.title.y = element_text(angle=0, vjust=0.5, size=20)) 
 
 
 
