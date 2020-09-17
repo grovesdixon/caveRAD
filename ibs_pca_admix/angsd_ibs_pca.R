@@ -6,6 +6,7 @@ library(tidyverse)
 library(vegan)
 library(adegenet) 
 library(cowplot)
+library(ggdendro)
 theme_set(theme_cowplot())
 
 
@@ -73,6 +74,16 @@ p2 + geom_text(data=labs,
                aes(label=label, x=x, y=0, colour=labs$site), angle=90, hjust = 1) +
   lims(y=c(-.1, 0.4)) +
   labs(color='')
+
+
+# optimal number of clusters ----------------------------------------------
+library(mclust)
+d_clust2 <- Mclust(as.dist(ma), G=1:5)
+d_clust2$BIC
+plot(d_clust2$BIC)
+m.best2 <- dim(d_clust2$z)[2]
+
+cat("model-based optimal number of clusters:", m.best2, "\n")
 
 
 # performing PCoA and CAP

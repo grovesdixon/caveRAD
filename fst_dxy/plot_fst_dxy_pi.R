@@ -135,21 +135,18 @@ unique(dat$group)
 
 #SUMMARIZE
 #by cave fst
-dat %>% 
+stab = dat %>% 
   group_by(group, spp, stat) %>% 
   summarize(mn = mean(value, na.rm=TRUE)) %>% 
   filter(stat=='fst') %>% 
   mutate(M=1/mn-1) %>% #where M = 4Ne*m; see page 94 in Molecular Population Genetics (Hahn 2018)
   arrange(mn)
+stab
 
-#estimate 4NeM
-dat %>% 
-  group_by(group, spp, stat) %>% 
-  summarize(mn = mean(value, na.rm=TRUE)) %>% 
-  filter(stat=='fst') %>% 
-  arrange(mn) %>% 
-  mutate()
-
+#means
+stab %>% 
+  group_by(spp) %>% 
+  summarize(mnM = mean(M))
 
 #by cave dxy
 dat %>% 
